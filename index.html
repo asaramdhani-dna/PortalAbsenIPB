@@ -393,7 +393,9 @@ const AVATAR_COLORS = ['#3b82f6','#6366f1','#8b5cf6','#ec4899','#f59e0b','#10b98
 
 let session  = {role:null, empId:null, nama:null};
 let appData  = {karyawan:[], absen:[], tim:[]};
-const API_URL = 'https://script.google.com/macros/s/AKfycbwBGxuG3wVjYgXNw6UmfyN-sEp72tOD46XK5dCXB3wXQqb7YG2-zB4r0fnYj1KwGjGY/exec';
+// Gunakan path relatif /api/gas yang di-proxy oleh Vercel ke GAS
+// Ini menghindari masalah CORS karena request dikirim dari origin yang sama
+const API_URL = '/api/gas';
 
 // ══════════════════════════════════════════════════════
 // HELPERS
@@ -423,58 +425,44 @@ function showToast(msg) {
 
 // ══════════════════════════════════════════════════════
 // API LAYER
-// Menggunakan JSONP untuk semua request ke GAS agar
-// tidak kena blokir CORS saat dihost di Vercel.
+// Request dikirim ke /api/gas (path relatif, same-origin).
+// Vercel meneruskannya ke GAS via rewrite di vercel.json.
+// Karena same-origin, tidak ada masalah CORS sama sekali.
 // ══════════════════════════════════════════════════════
 
-// Kirim request ke GAS via JSONP (inject <script> tag)
-// Ini satu-satunya cara reliable karena GAS tidak selalu
-// mengirim header CORS yang benar untuk semua browser.
-function jsonpRequest(url) {
-  return new Promise((resolve, reject) => {
-    // Nama callback unik agar tidak konflik jika ada request paralel
-    const cbName = '__gasCb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
-
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('Request timeout (15 detik). Cek koneksi internet atau URL Apps Script.'));
-    }, 15000);
-
-    function cleanup() {
-      clearTimeout(timeout);
-      delete window[cbName];
-      if (script.parentNode) script.parentNode.removeChild(script);
-    }
-
-    window[cbName] = function(data) {
-      cleanup();
-      resolve(data);
-    };
-
-    const separator = url.includes('?') ? '&' : '?';
-    const script    = document.createElement('script');
-    script.src      = url + separator + 'callback=' + cbName;
-    script.onerror  = function() {
-      cleanup();
-      reject(new Error('Gagal memuat script dari Apps Script. Pastikan URL benar dan deployment aktif.'));
-    };
-    document.head.appendChild(script);
-  });
-}
-
 async function apiGet() {
-  const json = await jsonpRequest(API_URL);
-  if (json.status !== 'ok') throw new Error(json.message || 'Response error dari server');
-  return json.data;
+  let res, text;
+  try {
+    res  = await fetch(API_URL, { redirect: 'follow' });
+    text = await res.text();
+  } catch(e) {
+    throw new Error('Koneksi gagal: ' + e.message);
+  }
+  try {
+    const json = JSON.parse(text);
+    if (json.status !== 'ok') throw new Error(json.message || 'Response error dari server');
+    return json.data;
+  } catch(e) {
+    throw new Error('Response tidak valid dari server. Preview: ' + text.slice(0, 200));
+  }
 }
 
 async function apiPost(action, data) {
-  // Mutasi data juga dikirim via JSONP (GET + query param)
-  // karena Apps Script doGet sudah menangani semua action
   const params = new URLSearchParams({ action, data: JSON.stringify(data) });
-  const json   = await jsonpRequest(`${API_URL}?${params}`);
-  if (json.status !== 'ok') throw new Error(json.message || 'Gagal menyimpan data');
-  return json.data;
+  let res, text;
+  try {
+    res  = await fetch(`${API_URL}?${params}`, { redirect: 'follow' });
+    text = await res.text();
+  } catch(e) {
+    throw new Error('Koneksi gagal: ' + e.message);
+  }
+  try {
+    const json = JSON.parse(text);
+    if (json.status !== 'ok') throw new Error(json.message || 'Gagal menyimpan data');
+    return json.data;
+  } catch(e) {
+    throw new Error('Response tidak valid dari server. Preview: ' + text.slice(0, 200));
+  }
 }
 
 // Normalisasi ID: strip leading zeros untuk perbandingan

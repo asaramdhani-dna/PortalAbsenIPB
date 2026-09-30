@@ -425,10 +425,26 @@ function showToast(msg) {
 // API LAYER
 // ══════════════════════════════════════════════════════
 async function apiGet() {
-  const res = await fetch(API_URL, {redirect:'follow'});
-  const json = await res.json();
-  if (json.status !== 'ok') throw new Error(json.message);
-  return json.data;
+  let res;
+  try {
+    res = await fetch(API_URL, {redirect:'follow'});
+  } catch(fetchErr) {
+    throw new Error('Tidak bisa terhubung ke server. Cek koneksi internet. Detail: ' + fetchErr.message);
+  }
+  if (!res.ok) throw new Error(`HTTP error ${res.status}: ${res.statusText}`);
+  let text = '';
+  try {
+    text = await res.text();
+    const json = JSON.parse(text);
+    if (json.status !== 'ok') throw new Error(json.message || 'Response error dari server');
+    return json.data;
+  } catch(parseErr) {
+    // Jika bukan JSON (misal redirect ke halaman login Google)
+    if (text.includes('google.com/accounts') || text.includes('ServiceLogin')) {
+      throw new Error('Apps Script belum diset "Anyone can access". Buka GAS → Deploy → Manage Deployments → pastikan "Who has access: Anyone".');
+    }
+    throw new Error('Response tidak valid dari server. Pastikan GAS sudah di-deploy sebagai Web App. Preview: ' + text.substring(0, 200));
+  }
 }
 
 async function apiPost(action, data) {
@@ -561,8 +577,21 @@ async function goToLogin() {
     hideLoading();
   } catch(e) {
     hideLoading();
-    showToast('❌ Gagal terhubung. Periksa URL Apps Script.');
-    console.error(e);
+    // Tampilkan error yang lebih detail di UI, bukan hanya toast
+    const loginCard = document.querySelector('.login-card');
+    const existing  = document.getElementById('api-error-box');
+    if (existing) existing.remove();
+    const box = document.createElement('div');
+    box.id = 'api-error-box';
+    box.style.cssText = 'background:#fef2f2;border:1.5px solid #fecaca;border-radius:8px;padding:14px 16px;margin-top:16px;font-size:13px;color:#b91c1c;line-height:1.6;word-break:break-word;';
+    box.innerHTML = `<strong>❌ Gagal terhubung ke database</strong><br>${e.message}<br><br>
+      <strong>Langkah perbaikan:</strong><br>
+      1. Buka <a href="https://script.google.com" target="_blank" style="color:#b91c1c">script.google.com</a><br>
+      2. Buka project GAS → Deploy → Manage Deployments<br>
+      3. Pastikan <strong>Who has access: Anyone</strong><br>
+      4. Jika baru diubah, klik <strong>New Deployment</strong> (bukan edit), copy URL baru → update <code>API_URL</code> di index.html`;
+    loginCard.appendChild(box);
+    console.error('API Error:', e);
   }
 }
 

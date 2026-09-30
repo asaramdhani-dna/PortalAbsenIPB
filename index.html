@@ -443,12 +443,13 @@ async function apiPost(action, data) {
 
 // Normalisasi ID: strip leading zeros untuk perbandingan
 // Sheet Karyawan: "00070108", Sheet Absen: "70108" → keduanya jadi "70108"
+// PENTING: GAS normalizeEmpId pakai uppercase untuk alphanumeric → frontend harus sama
 function normalizeId(id) {
   const s = String(id || '').trim();
   // Kalau purely numeric (mungkin ada leading zeros), strip them
   if (/^\d+$/.test(s)) return String(parseInt(s, 10));
-  // Kalau alphanumeric (MS1, MS2, dll), tetap lowercase
-  return s.toLowerCase();
+  // Kalau alphanumeric (MS1, MS2, dll), uppercase (konsisten dengan GAS)
+  return s.toUpperCase();
 }
 
 // Normalisasi tanggal dari berbagai format ke YYYY-MM-DD
@@ -618,9 +619,9 @@ function startApp() {
   badge.className = 'user-role-badge ' + (session.role==='manager' ? 'badge-management' : 'badge-pekerja');
 
   buildTabs();
-  initFilters();
+  // switchTab sudah async, tidak perlu await di sini karena render akan berjalan
   if (session.role==='karyawan') switchTab('absen-hari-ini');
-  else { switchTab('mgr-hari-ini'); }
+  else switchTab('mgr-hari-ini');
 }
 
 function buildTabs() {
@@ -638,11 +639,23 @@ function buildTabs() {
   ).join('');
 }
 
-function switchTab(id) {
+async function switchTab(id) {
   document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById('tab-'+id)?.classList.add('active');
   document.getElementById('tbtn-'+id)?.classList.add('active');
+
+  // Refresh data dari API setiap kali pindah tab agar selalu fresh
+  try {
+    showLoading('Memuat data...');
+    await refreshData();
+    initFilters();
+    hideLoading();
+  } catch(e) {
+    hideLoading();
+    showToast('⚠️ Gagal memuat ulang data: ' + e.message);
+  }
+
   if (id==='absen-hari-ini') renderAbsenHariIni();
   if (id==='mgr-hari-ini')   renderMgrHariIni();
   if (id==='rekap')          renderRekap();
@@ -827,7 +840,30 @@ function renderRekap() {
   });
   const totals = {}; STATUS_LIST.forEach(s=>totals[s]=0);
 
-  document.getElementById('tbody-rekap').innerHTML = allKar.map((k,i)=>{
+  // Kumpulkan semua nid yang punya data absen di periode ini
+  // (untuk debug: tampilkan juga karyawan yang ada di absen tapi tidak di daftar aktif)
+  const nidDiAbsen = new Set(fil.map(a=>a.nid));
+  const nidDiKar   = new Set(allKar.map(k=>k.nid));
+
+  // Gabungkan: semua karyawan aktif + karyawan yang ada di absen (meski tidak aktif / ID beda)
+  const extraAbsenNids = [...nidDiAbsen].filter(nid => !nidDiKar.has(nid));
+  const extraKar = extraAbsenNids.map(nid => {
+    // Cari di karyawan (mungkin nonaktif)
+    const k = appData.karyawan.find(x=>x.nid===nid);
+    // Ambil nama dari data absen jika karyawan tidak ditemukan
+    const contohAbsen = fil.find(a=>a.nid===nid);
+    return k || { id: contohAbsen?.empId||nid, nid, nama: contohAbsen?.nama||nid, jabatan:'—', dept:'—', aktif:false };
+  });
+
+  const semuaKar = [...allKar, ...extraKar];
+  if (!semuaKar.length) {
+    document.getElementById('tbody-rekap').innerHTML =
+      `<tr><td colspan="10"><div class="empty-state"><div class="icon">📭</div><p>Tidak ada data karyawan</p></div></td></tr>`;
+    document.getElementById('tfoot-rekap').innerHTML = '';
+    return;
+  }
+
+  document.getElementById('tbody-rekap').innerHTML = semuaKar.map((k,i)=>{
     const c={}; STATUS_LIST.forEach(s=>c[s]=0);
     fil.filter(a=>a.nid===k.nid).forEach(a=>{ if(c[a.status]!==undefined) c[a.status]++; });
     STATUS_LIST.forEach(s=>totals[s]+=c[s]);
@@ -857,7 +893,26 @@ function renderLaporan() {
   const fil    = appData.absen.filter(a=>a.tanggal>=mulai&&a.tanggal<=akhir);
   const totals = {}; STATUS_LIST.forEach(s=>totals[s]=0);
 
-  document.getElementById('tbody-laporan').innerHTML = allKar.map((k,i)=>{
+  // Gabungkan karyawan aktif + karyawan dari data absen yang tidak ada di list aktif
+  const nidDiAbsen = new Set(fil.map(a=>a.nid));
+  const nidDiKar   = new Set(allKar.map(k=>k.nid));
+  const extraAbsenNids = [...nidDiAbsen].filter(nid => !nidDiKar.has(nid));
+  const extraKar = extraAbsenNids.map(nid => {
+    const k = appData.karyawan.find(x=>x.nid===nid);
+    const contohAbsen = fil.find(a=>a.nid===nid);
+    if (k && dept && k.dept !== dept) return null; // filter dept
+    return k || { id: contohAbsen?.empId||nid, nid, nama: contohAbsen?.nama||nid, jabatan:'—', dept:'—', aktif:false };
+  }).filter(Boolean);
+
+  const semuaKar = [...allKar, ...extraKar];
+  if (!semuaKar.length) {
+    document.getElementById('tbody-laporan').innerHTML =
+      `<tr><td colspan="10"><div class="empty-state"><div class="icon">📭</div><p>Tidak ada data</p></div></td></tr>`;
+    document.getElementById('tfoot-laporan').innerHTML = '';
+    return;
+  }
+
+  document.getElementById('tbody-laporan').innerHTML = semuaKar.map((k,i)=>{
     const c={}; STATUS_LIST.forEach(s=>c[s]=0);
     fil.filter(a=>a.nid===k.nid).forEach(a=>{ if(c[a.status]!==undefined) c[a.status]++; });
     STATUS_LIST.forEach(s=>totals[s]+=c[s]);

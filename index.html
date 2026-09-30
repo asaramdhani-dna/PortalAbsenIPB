@@ -423,37 +423,57 @@ function showToast(msg) {
 
 // ══════════════════════════════════════════════════════
 // API LAYER
+// Menggunakan JSONP untuk semua request ke GAS agar
+// tidak kena blokir CORS saat dihost di Vercel.
 // ══════════════════════════════════════════════════════
-async function apiGet() {
-  let res;
-  try {
-    res = await fetch(API_URL, {redirect:'follow'});
-  } catch(fetchErr) {
-    throw new Error('Tidak bisa terhubung ke server. Cek koneksi internet. Detail: ' + fetchErr.message);
-  }
-  if (!res.ok) throw new Error(`HTTP error ${res.status}: ${res.statusText}`);
-  let text = '';
-  try {
-    text = await res.text();
-    const json = JSON.parse(text);
-    if (json.status !== 'ok') throw new Error(json.message || 'Response error dari server');
-    return json.data;
-  } catch(parseErr) {
-    // Jika bukan JSON (misal redirect ke halaman login Google)
-    if (text.includes('google.com/accounts') || text.includes('ServiceLogin')) {
-      throw new Error('Apps Script belum diset "Anyone can access". Buka GAS → Deploy → Manage Deployments → pastikan "Who has access: Anyone".');
+
+// Kirim request ke GAS via JSONP (inject <script> tag)
+// Ini satu-satunya cara reliable karena GAS tidak selalu
+// mengirim header CORS yang benar untuk semua browser.
+function jsonpRequest(url) {
+  return new Promise((resolve, reject) => {
+    // Nama callback unik agar tidak konflik jika ada request paralel
+    const cbName = '__gasCb_' + Date.now() + '_' + Math.floor(Math.random() * 1e6);
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Request timeout (15 detik). Cek koneksi internet atau URL Apps Script.'));
+    }, 15000);
+
+    function cleanup() {
+      clearTimeout(timeout);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
     }
-    throw new Error('Response tidak valid dari server. Pastikan GAS sudah di-deploy sebagai Web App. Preview: ' + text.substring(0, 200));
-  }
+
+    window[cbName] = function(data) {
+      cleanup();
+      resolve(data);
+    };
+
+    const separator = url.includes('?') ? '&' : '?';
+    const script    = document.createElement('script');
+    script.src      = url + separator + 'callback=' + cbName;
+    script.onerror  = function() {
+      cleanup();
+      reject(new Error('Gagal memuat script dari Apps Script. Pastikan URL benar dan deployment aktif.'));
+    };
+    document.head.appendChild(script);
+  });
+}
+
+async function apiGet() {
+  const json = await jsonpRequest(API_URL);
+  if (json.status !== 'ok') throw new Error(json.message || 'Response error dari server');
+  return json.data;
 }
 
 async function apiPost(action, data) {
-  // Google Apps Script Web App: kirim via GET dengan query param
-  // (Apps Script doGet yang menangani, doPost sering tidak di-deploy)
+  // Mutasi data juga dikirim via JSONP (GET + query param)
+  // karena Apps Script doGet sudah menangani semua action
   const params = new URLSearchParams({ action, data: JSON.stringify(data) });
-  const res = await fetch(`${API_URL}?${params}`, { method: 'GET', redirect: 'follow' });
-  const json = await res.json();
-  if (json.status !== 'ok') throw new Error(json.message);
+  const json   = await jsonpRequest(`${API_URL}?${params}`);
+  if (json.status !== 'ok') throw new Error(json.message || 'Gagal menyimpan data');
   return json.data;
 }
 
@@ -577,19 +597,13 @@ async function goToLogin() {
     hideLoading();
   } catch(e) {
     hideLoading();
-    // Tampilkan error yang lebih detail di UI, bukan hanya toast
     const loginCard = document.querySelector('.login-card');
     const existing  = document.getElementById('api-error-box');
     if (existing) existing.remove();
     const box = document.createElement('div');
     box.id = 'api-error-box';
     box.style.cssText = 'background:#fef2f2;border:1.5px solid #fecaca;border-radius:8px;padding:14px 16px;margin-top:16px;font-size:13px;color:#b91c1c;line-height:1.6;word-break:break-word;';
-    box.innerHTML = `<strong>❌ Gagal terhubung ke database</strong><br>${e.message}<br><br>
-      <strong>Langkah perbaikan:</strong><br>
-      1. Buka <a href="https://script.google.com" target="_blank" style="color:#b91c1c">script.google.com</a><br>
-      2. Buka project GAS → Deploy → Manage Deployments<br>
-      3. Pastikan <strong>Who has access: Anyone</strong><br>
-      4. Jika baru diubah, klik <strong>New Deployment</strong> (bukan edit), copy URL baru → update <code>API_URL</code> di index.html`;
+    box.innerHTML = `<strong>❌ Gagal terhubung ke database</strong><br>${e.message}`;
     loginCard.appendChild(box);
     console.error('API Error:', e);
   }
